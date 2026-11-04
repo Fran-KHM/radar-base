@@ -4,6 +4,7 @@ Base de radares usada pelo app **Radar** (Garmin Connect IQ, uso pessoal). O rel
 
 - `blocos/t<chave>.json`: radares de um bloco de 0,1 grau (~11 km), no formato `{"r": [...]}`. Chave = `floor((lat + 90) / 0,1) * 10000 + floor((lon + 180) / 0,1)`. Cada radar ocupa 5 números: latitude × 100000, longitude × 100000, limite em km/h (0 = sem), direção fiscalizada em graus (-1 = sem) e tipo em bits (1 velocidade, 2 semáforo, 4 lombada eletrônica, 8 faixa de ônibus).
 - `blocos/indice.json`: data, contagens e lista de chaves.
+- `sentido.py`: descobre o sentido fiscalizado de cada radar pela pista de mão única mais próxima (avenidas com canteiro, marginais, rodovias), para o app ignorar o radar da outra mão. Só grava quando não há outra via quase tão perto. Teste em `testes/teste_sentido.py`.
 - `gerar_base.ps1`: monta tudo. Roda todo dia às 03:17 (Brasília) pelo GitHub Actions (`.github/workflows/atualizar.yml`).
 
 ## Fontes e licenças

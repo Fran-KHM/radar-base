@@ -15,7 +15,8 @@ param(
     [string]$Area = 'BR',          # BR (pais) ou BR-SP, BR-RJ...
     [double]$Tam = 0.1,            # bloco em graus (~11 km)
     [string]$Trabalho = '',        # pasta das copias baixadas (padrao: <Destino>/dados)
-    [string]$OsmGeoJson = ''       # radares ja filtrados do extrato do Geofabrik (osmium export); vazio = Overpass
+    [string]$OsmGeoJson = '',      # radares ja filtrados do extrato do Geofabrik (osmium export); vazio = Overpass
+    [string]$Sentidos = ''         # sentidos.json do sentido.py: sentido de cada radar pela pista de mao unica
 )
 $ErrorActionPreference = 'Stop'
 $inv = [Globalization.CultureInfo]::InvariantCulture
@@ -130,7 +131,19 @@ foreach ($e in $todos) {
     $nOsm++
 }
 
-# 4. Blocos: chave = linha * 10000 + coluna; cada radar = lat x 100000, lon x 100000, limite (0 = sem),
+# 4. Sentido pela pista de mao unica (sentido.py), so para quem nao tem direcao propria no OSM
+$nSentido = 0
+if ($Sentidos -and (Test-Path $Sentidos)) {
+    $mapa = Get-Content $Sentidos -Raw | ConvertFrom-Json
+    foreach ($p in $pts) {
+        if ($p[3] -ge 0) { continue }
+        $k = "$([Math]::Floor($p[0] * 100000 + 0.5)),$([Math]::Floor($p[1] * 100000 + 0.5))"
+        $v = $mapa.$k
+        if ($null -ne $v) { $p[3] = [int]$v; $nSentido++ }
+    }
+}
+
+# 5. Blocos: chave = linha * 10000 + coluna; cada radar = lat x 100000, lon x 100000, limite (0 = sem),
 #    direcao fiscalizada em graus (-1 = sem), tipo (bits)
 $blocos = @{}
 foreach ($p in $pts) {
@@ -147,7 +160,7 @@ if ($Saida -eq 'servidor') {
     Get-ChildItem $dirBlocos -Filter 't*.json' | Remove-Item -Confirm:$false
     # objeto {"r":[...]} e nao lista solta: o makeWebRequest do relogio espera um dicionario JSON
     foreach ($k in $chaves) { ('{"r":[' + ($blocos[$k] -join ',') + ']}') | Set-Content -Encoding ascii (Join-Path $dirBlocos "t$k.json") }
-    $indice = [ordered]@{ atualizado = $hoje; area = $Area; tam = $Tam; total = $pts.Count; cet = $nCet; osm = $nOsm; semaforos = $nSemaf; lombadas = $nLomb; onibus = $nOnibus; chaves = $chaves }
+    $indice = [ordered]@{ atualizado = $hoje; area = $Area; tam = $Tam; total = $pts.Count; cet = $nCet; osm = $nOsm; semaforos = $nSemaf; lombadas = $nLomb; onibus = $nOnibus; com_sentido = $nSentido; chaves = $chaves }
     $indice | ConvertTo-Json -Compress | Set-Content -Encoding ascii (Join-Path $dirBlocos 'indice.json')
 } else {
     $dirJson = Pasta (Join-Path (Join-Path $Destino 'resources') 'jsondata')
@@ -191,4 +204,4 @@ if ($Saida -eq 'servidor') {
 }
 
 $maior = ($blocos.Values | ForEach-Object { $_.Count / 5 } | Measure-Object -Maximum).Maximum
-"Radares: $($pts.Count) ($nCet da CET: $nSemaf semaforo, $nLomb lombada, $nOnibus faixa de onibus; $nOsm do OSM) em $($blocos.Count) blocos de $tamTxt graus (maior bloco: $maior)."
+"Radares: $($pts.Count) ($nCet da CET: $nSemaf semaforo, $nLomb lombada, $nOnibus faixa de onibus; $nOsm do OSM; $nSentido com sentido pela via) em $($blocos.Count) blocos de $tamTxt graus (maior bloco: $maior)."

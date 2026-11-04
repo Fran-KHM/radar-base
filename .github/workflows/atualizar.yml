@@ -12,23 +12,33 @@ permissions:
 jobs:
   atualizar:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
+
+      - name: Testar o calculo de sentido
+        run: python3 testes/teste_sentido.py
 
       - name: Instalar osmium
         run: sudo apt-get update -q && sudo apt-get install -y -q osmium-tool
 
-      - name: Baixar o Brasil do Geofabrik e separar os radares
+      - name: Baixar o Brasil do Geofabrik e separar radares e vias de carro
         run: |
           curl -fsSL --retry 3 -o brasil.osm.pbf https://download.geofabrik.de/south-america/brazil-latest.osm.pbf
           osmium tags-filter brasil.osm.pbf n/highway=speed_camera -o radares.osm.pbf
           osmium export radares.osm.pbf -f geojson --add-unique-id=type_id -o radares.geojson
+          osmium tags-filter brasil.osm.pbf w/highway=motorway,motorway_link,trunk,trunk_link,primary,primary_link,secondary,secondary_link,tertiary,tertiary_link,unclassified,residential,living_street -o vias.osm.pbf
           rm brasil.osm.pbf
+          osmium export vias.osm.pbf -f geojsonseq --geometry-types=linestring --add-unique-id=type_id -x print_record_separator=false -o vias.geojsonseq
+          rm vias.osm.pbf
+          curl -fsSL --retry 3 -o cet.csv https://raw.githubusercontent.com/cetsp-dados/dados-fiscalizacao-eletronica/HEAD/Base_Locais_Fiscalizados.csv
+
+      - name: Sentido de cada radar pela pista de mao unica
+        run: python3 sentido.py radares.geojson cet.csv vias.geojsonseq sentidos.json
 
       - name: Gerar blocos (CET + OpenStreetMap)
         shell: pwsh
-        run: ./gerar_base.ps1 -Saida servidor -Destino . -Area BR -OsmGeoJson radares.geojson
+        run: ./gerar_base.ps1 -Saida servidor -Destino . -Area BR -OsmGeoJson radares.geojson -Sentidos sentidos.json
 
       - name: Publicar se mudou
         run: |
