@@ -12,13 +12,23 @@ permissions:
 jobs:
   atualizar:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
+      - name: Instalar osmium
+        run: sudo apt-get update -q && sudo apt-get install -y -q osmium-tool
+
+      - name: Baixar o Brasil do Geofabrik e separar os radares
+        run: |
+          curl -fsSL --retry 3 -o brasil.osm.pbf https://download.geofabrik.de/south-america/brazil-latest.osm.pbf
+          osmium tags-filter brasil.osm.pbf n/highway=speed_camera -o radares.osm.pbf
+          osmium export radares.osm.pbf -f geojson --add-unique-id=type_id -o radares.geojson
+          rm brasil.osm.pbf
+
       - name: Gerar blocos (CET + OpenStreetMap)
         shell: pwsh
-        run: ./gerar_base.ps1 -Saida servidor -Destino . -Area BR
+        run: ./gerar_base.ps1 -Saida servidor -Destino . -Area BR -OsmGeoJson radares.geojson
 
       - name: Publicar se mudou
         run: |

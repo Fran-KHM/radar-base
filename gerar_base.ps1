@@ -14,7 +14,8 @@ param(
     [string]$Destino = '.',
     [string]$Area = 'BR',          # BR (pais) ou BR-SP, BR-RJ...
     [double]$Tam = 0.1,            # bloco em graus (~11 km)
-    [string]$Trabalho = ''         # pasta das copias baixadas (padrao: <Destino>/dados)
+    [string]$Trabalho = '',        # pasta das copias baixadas (padrao: <Destino>/dados)
+    [string]$OsmGeoJson = ''       # radares ja filtrados do extrato do Geofabrik (osmium export); vazio = Overpass
 )
 $ErrorActionPreference = 'Stop'
 $inv = [Globalization.CultureInfo]::InvariantCulture
@@ -25,12 +26,27 @@ $ua = 'radar-base/1.0 (github.com/Fran-KHM/radar-base)'
 function Pasta([string]$p) { New-Item -ItemType Directory -Force $p | Out-Null; $p }
 function Num([string]$s) { if ($s -match '^\s*(\d+)') { return [int]$Matches[1] } return 0 }
 
-# 1. OpenStreetMap, estado por estado (o pais inteiro numa consulta so estoura o servidor publico).
-#    Se um estado falhar, usa a ultima copia boa dele; se nunca houve copia, para com erro.
-$ufs = if ($Area -eq 'BR') { 'AC AL AP AM BA CE DF ES GO MA MT MS MG PA PB PR PE PI RJ RN RS RO RR SC SP SE TO'.Split(' ') | ForEach-Object { "BR-$_" } } else { @($Area) }
-$dirUf = Pasta (Join-Path $Trabalho 'uf')
+# 1. OpenStreetMap. Na rotina do GitHub vem do extrato diario do Brasil no Geofabrik, ja filtrado pelo osmium
+#    (confiavel e feito para download). Sem -OsmGeoJson, consulta o Overpass estado por estado (uso local);
+#    se um estado falhar, usa a ultima copia boa dele; se nunca houve copia, para com erro.
 $todos = New-Object System.Collections.ArrayList
 $vistos = @{}
+$ufs = @()
+if ($OsmGeoJson) {
+    foreach ($f in (Get-Content $OsmGeoJson -Raw | ConvertFrom-Json).features) {
+        if ($f.geometry.type -ne 'Point') { continue }
+        $id = "$($f.id)"
+        if ($vistos.ContainsKey($id)) { continue }
+        $vistos[$id] = $true
+        [void]$todos.Add([pscustomobject]@{ id = $id; lat = [double]$f.geometry.coordinates[1]; lon = [double]$f.geometry.coordinates[0]; tags = $f.properties })
+    }
+    "Geofabrik: $($todos.Count) radares"
+} elseif ($Area -eq 'BR') {
+    $ufs = 'AC AL AP AM BA CE DF ES GO MA MT MS MG PA PB PR PE PI RJ RN RS RO RR SC SP SE TO'.Split(' ') | ForEach-Object { "BR-$_" }
+} else {
+    $ufs = @($Area)
+}
+$dirUf = Pasta (Join-Path $Trabalho 'uf')
 foreach ($uf in $ufs) {
     $arqUf = Join-Path $dirUf "$uf.json"
     $q = "[out:json][timeout:180];area[`"ISO3166-2`"=`"$uf`"][admin_level=4]->.a;node[`"highway`"=`"speed_camera`"](area.a);out;"
