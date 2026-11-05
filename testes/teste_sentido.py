@@ -58,7 +58,8 @@ for k in (sentido.chave(-23.5006, -46.70010), sentido.chave(-23.5000, -46.69002)
     if k in s:
         erros.append(f"{k}: nao devia ter sentido, veio {s[k]}")
 # tracado da pista: A (pista norte) e D (rua de mao dupla) tem; C (no canteiro, incerto) nao tem.
-# A pista norte e uma reta vertical a ~4 m a leste... a oeste do radar A: dlon constante, dlat de -400 m a +400 m
+# A pista norte e uma reta a 0,00004 grau a leste do radar A (dlon = 4) e vai de -23.502 a -23.498, menos que os
+# 400 m de alcance: o tracado para nas pontas da via (dlat = -200 e +200)
 with open(sentido.arq_pistas) as f:
     pistas = json.load(f)
 pa = pistas.get(sentido.chave(-23.5000, -46.70004))
@@ -66,7 +67,7 @@ if not pa or len(pa) != 4:
     erros.append(f"pista do radar A devia ser uma reta (2 pontos), veio {pa}")
 else:
     dlat = [pa[0], pa[2]]
-    if not (-370 < min(dlat) < -350 and 350 < max(dlat) < 370 and pa[1] == pa[3] == 4):
+    if not (min(dlat) == -200 and max(dlat) == 200 and pa[1] == pa[3] == 4):
         erros.append(f"pista do radar A fora do esperado: {pa}")
 if sentido.chave(-23.5000, -46.69002) not in pistas:
     erros.append("rua de mao dupla (D) devia ter tracado")
