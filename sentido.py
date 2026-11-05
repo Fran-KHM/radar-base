@@ -9,11 +9,13 @@ Entrada:
   vias.geojsonseq  vias de carro do Brasil (osmium export -f geojsonseq), uma por linha
 Saida:
   sentidos.json    {"<lat x 100000>,<lon x 100000>": graus}, so dos radares com sentido seguro
+  pistas.json      (opcional) {"<chave>": [dlat, dlon, ...]} tracado da pista +-400 m em volta do radar, em
+                   graus x 100000 relativos ao radar; tambem para ruas de mao dupla (sem sentido)
 
 So grava sentido quando a via mais proxima e de mao unica, esta a ate DIST_MAX metros e nao ha outra via quase
 tao perto (perto de cruzamento ou entre as duas pistas, fica sem sentido e o app avisa nos dois sentidos).
 
-Uso: python3 sentido.py radares.geojson cet.csv vias.geojsonseq sentidos.json
+Uso: python3 sentido.py radares.geojson cet.csv vias.geojsonseq sentidos.json [pistas.json]
 """
 import csv
 import json
@@ -83,6 +85,9 @@ def dist_segmento(lat, lon, a, b):
     return math.hypot(px, py), math.degrees(math.atan2(dx, dy)) % 360
 
 
+arq_pistas = None   # pistas.json (opcional, 5o argumento): tracado da pista de cada radar
+
+
 def main(arq_osm, arq_cet, arq_vias, arq_saida):
     radares = carregar_radares(arq_osm, arq_cet)
     grade = {}
@@ -131,28 +136,128 @@ def main(arq_osm, arq_cet, arq_vias, arq_saida):
                 if dmin is None or dmin > 60:
                     continue
                 lista = melhor.setdefault(k, [])
-                lista.append((dmin, id_via, rumo, mao))
+                lista.append((dmin, id_via, rumo, mao, coords))
                 lista.sort(key=lambda x: x[0])
                 del lista[2:]
+            # viabilidade da opcao B (encaixe na pista no relogio): pontos de via de carro por bloco de 0,1 grau
+            for lon, lat in (c[:2] for c in coords):
+                kb = (math.floor((lat + 90) / 0.1), math.floor((lon + 180) / 0.1))
+                pontos_bloco[kb] = pontos_bloco.get(kb, 0) + 1
 
     sentidos = {}
+    pistas = {}
     for k, lista in melhor.items():
-        d1, _, rumo, mao = lista[0]
-        if mao == 0 or d1 > DIST_MAX:
+        d1, _, rumo, mao, coords = lista[0]
+        if d1 > DIST_MAX:
             continue
         if len(lista) > 1:
-            d2, _, rumo2, mao2 = lista[1]
+            d2, _, rumo2, mao2, _ = lista[1]
             sentido2 = (rumo2 + (180 if mao2 < 0 else 0)) % 360
             mesma_pista = mao2 != 0 and abs((sentido2 - (rumo + (180 if mao < 0 else 0)) + 180) % 360 - 180) < 30
-            # outra via quase tao perto, que nao seja a continuacao da mesma pista: sentido incerto
+            # outra via quase tao perto, que nao seja a continuacao da mesma pista: pista e sentido incertos
             if not mesma_pista and d2 - d1 < FOLGA and d2 < d1 * RAZAO:
                 continue
-        sentidos[k] = round((rumo + (180 if mao < 0 else 0)) % 360)
+        # tracado da pista (ou da rua de mao dupla) +-ALCANCE_PISTA metros em volta do radar, para o app saber
+        # se estamos nela ou numa pista paralela (Marginal: expressa, central e local)
+        lat, lon = radares[k]
+        pistas[k] = trecho_pista(coords, lat, lon)
+        if mao != 0:
+            sentidos[k] = round((rumo + (180 if mao < 0 else 0)) % 360)
 
     with open(arq_saida, "w", encoding="ascii") as f:
         json.dump(sentidos, f, separators=(",", ":"))
-    print(f"Vias lidas: {vias}. Radares: {len(radares)}, com via perto: {len(melhor)}, com sentido seguro: {len(sentidos)}.")
+    if arq_pistas:
+        with open(arq_pistas, "w", encoding="ascii") as f:
+            json.dump(pistas, f, separators=(",", ":"))
+    print(f"Vias lidas: {vias}. Radares: {len(radares)}, com via perto: {len(melhor)}, com sentido seguro: {len(sentidos)}, "
+          f"com tracado da pista: {len(pistas)} (media {sum(len(v) for v in pistas.values()) / 2 / max(1, len(pistas)):.1f} pontos).")
+    relatorio_b(pontos_bloco)
+
+
+ALCANCE_PISTA = 400.0   # metros de pista guardados antes e depois do radar
+TOL_SIMPLIFICA = 2.0    # metros: pontos que desviam menos que isso da reta saem
+
+
+def trecho_pista(coords, lat, lon):
+    """Pedaco da via em volta do radar, simplificado, em [dlat, dlon, ...] x 100000 relativos ao radar."""
+    cl = math.cos(math.radians(lat))
+    xy = [((c[0] - lon) * M_POR_GRAU * cl, (c[1] - lat) * M_POR_GRAU) for c in coords]
+    # segmento mais perto do radar e o ponto de projecao nele
+    melhor_i, melhor_d, proj = 0, None, (0.0, 0.0)
+    for i in range(len(xy) - 1):
+        (ax, ay), (bx, by) = xy[i], xy[i + 1]
+        dx, dy = bx - ax, by - ay
+        l2 = dx * dx + dy * dy
+        t = 0.0 if l2 == 0 else max(0.0, min(1.0, -(ax * dx + ay * dy) / l2))
+        px, py = ax + t * dx, ay + t * dy
+        d = math.hypot(px, py)
+        if melhor_d is None or d < melhor_d:
+            melhor_i, melhor_d, proj = i, d, (px, py)
+    # anda ALCANCE_PISTA para tras e para a frente a partir da projecao
+    tras, falta, ant = [], ALCANCE_PISTA, proj
+    for i in range(melhor_i, -1, -1):
+        d = math.dist(ant, xy[i])
+        if d >= falta:
+            f = falta / d
+            tras.append((ant[0] + (xy[i][0] - ant[0]) * f, ant[1] + (xy[i][1] - ant[1]) * f))
+            break
+        tras.append(xy[i]); falta -= d; ant = xy[i]
+    frente, falta, ant = [], ALCANCE_PISTA, proj
+    for i in range(melhor_i + 1, len(xy)):
+        d = math.dist(ant, xy[i])
+        if d >= falta:
+            f = falta / d
+            frente.append((ant[0] + (xy[i][0] - ant[0]) * f, ant[1] + (xy[i][1] - ant[1]) * f))
+            break
+        frente.append(xy[i]); falta -= d; ant = xy[i]
+    linha = list(reversed(tras)) + [proj] + frente
+    linha = simplificar(linha, TOL_SIMPLIFICA)
+    saida = []
+    for x, y in linha:
+        saida += [round(y / M_POR_GRAU * 100000), round(x / (M_POR_GRAU * cl) * 100000)]
+    return saida
+
+
+def simplificar(pts, tol):
+    """Douglas-Peucker iterativo."""
+    if len(pts) < 3:
+        return pts
+    manter = [False] * len(pts)
+    manter[0] = manter[-1] = True
+    pilha = [(0, len(pts) - 1)]
+    while pilha:
+        a, b = pilha.pop()
+        (ax, ay), (bx, by) = pts[a], pts[b]
+        dx, dy = bx - ax, by - ay
+        l = math.hypot(dx, dy) or 1e-9
+        idx, dmax = None, tol
+        for i in range(a + 1, b):
+            d = abs((pts[i][0] - ax) * dy - (pts[i][1] - ay) * dx) / l
+            if d > dmax:
+                idx, dmax = i, d
+        if idx is not None:
+            manter[idx] = True
+            pilha += [(a, idx), (idx, b)]
+    return [p for p, m in zip(pts, manter) if m]
+
+
+def relatorio_b(pontos_bloco):
+    """Quanto pesaria mandar todas as vias de carro para o relogio (opcao B), nos blocos mais densos."""
+    if not pontos_bloco:
+        return
+    def viz(kb):
+        return sum(pontos_bloco.get((kb[0] + a, kb[1] + b), 0) for a in (-1, 0, 1) for b in (-1, 0, 1))
+    top = sorted(pontos_bloco.items(), key=lambda x: -x[1])[:5]
+    vals = sorted(pontos_bloco.values())
+    print("Viabilidade B: pontos de via de carro por bloco de 0,1 grau (sem simplificar)")
+    print(f"  blocos: {len(vals)}, mediana {vals[len(vals) // 2]}, maximo {vals[-1]}")
+    for kb, n in top:
+        print(f"  bloco {kb[0] * 10000 + kb[1]}: {n} pontos; com os 8 vizinhos: {viz(kb)}")
+
+
+pontos_bloco = {}
 
 
 if __name__ == "__main__":
+    arq_pistas = sys.argv[5] if len(sys.argv) > 5 else None
     main(*sys.argv[1:5])

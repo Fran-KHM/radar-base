@@ -16,7 +16,8 @@ param(
     [double]$Tam = 0.1,            # bloco em graus (~11 km)
     [string]$Trabalho = '',        # pasta das copias baixadas (padrao: <Destino>/dados)
     [string]$OsmGeoJson = '',      # radares ja filtrados do extrato do Geofabrik (osmium export); vazio = Overpass
-    [string]$Sentidos = ''         # sentidos.json do sentido.py: sentido de cada radar pela pista de mao unica
+    [string]$Sentidos = '',        # sentidos.json do sentido.py: sentido de cada radar pela pista de mao unica
+    [string]$Pistas = ''           # pistas.json do sentido.py: tracado da pista de cada radar (+-400 m)
 )
 $ErrorActionPreference = 'Stop'
 $inv = [Globalization.CultureInfo]::InvariantCulture
@@ -143,13 +144,26 @@ if ($Sentidos -and (Test-Path $Sentidos)) {
     }
 }
 
+# Tracado da pista de cada radar (sentido.py); radares sem tracado ficam com lista vazia
+$mapaPistas = $null
+$nPista = 0
+if ($Pistas -and (Test-Path $Pistas)) { $mapaPistas = Get-Content $Pistas -Raw | ConvertFrom-Json }
+
 # 5. Blocos: chave = linha * 10000 + coluna; cada radar = lat x 100000, lon x 100000, limite (0 = sem),
-#    direcao fiscalizada em graus (-1 = sem), tipo (bits)
+#    direcao fiscalizada em graus (-1 = sem), tipo (bits). Em paralelo, "v": o tracado da pista de cada radar,
+#    na mesma ordem ([dlat, dlon, ...] x 100000 relativos ao radar; [] = sem tracado)
 $blocos = @{}
+$viasBloco = @{}
 foreach ($p in $pts) {
     $k = [int][Math]::Floor(($p[0] + 90.0) / $Tam) * 10000 + [int][Math]::Floor(($p[1] + 180.0) / $Tam)
-    if (-not $blocos.ContainsKey($k)) { $blocos[$k] = New-Object System.Collections.ArrayList }
+    if (-not $blocos.ContainsKey($k)) { $blocos[$k] = New-Object System.Collections.ArrayList; $viasBloco[$k] = New-Object System.Collections.ArrayList }
     [void]$blocos[$k].AddRange(@([int][Math]::Round($p[0] * 100000), [int][Math]::Round($p[1] * 100000), $p[2], $p[3], $p[4]))
+    $pista = '[]'
+    if ($mapaPistas) {
+        $v = $mapaPistas."$([Math]::Floor($p[0] * 100000 + 0.5)),$([Math]::Floor($p[1] * 100000 + 0.5))"
+        if ($null -ne $v) { $pista = '[' + ($v -join ',') + ']'; $nPista++ }
+    }
+    [void]$viasBloco[$k].Add($pista)
 }
 $chaves = @($blocos.Keys | Sort-Object)
 $tamTxt = $Tam.ToString($inv)
@@ -159,8 +173,8 @@ if ($Saida -eq 'servidor') {
     $dirBlocos = Pasta (Join-Path $Destino 'blocos')
     Get-ChildItem $dirBlocos -Filter 't*.json' | Remove-Item -Confirm:$false
     # objeto {"r":[...]} e nao lista solta: o makeWebRequest do relogio espera um dicionario JSON
-    foreach ($k in $chaves) { ('{"r":[' + ($blocos[$k] -join ',') + ']}') | Set-Content -Encoding ascii (Join-Path $dirBlocos "t$k.json") }
-    $indice = [ordered]@{ atualizado = $hoje; area = $Area; tam = $Tam; total = $pts.Count; cet = $nCet; osm = $nOsm; semaforos = $nSemaf; lombadas = $nLomb; onibus = $nOnibus; com_sentido = $nSentido; chaves = $chaves }
+    foreach ($k in $chaves) { ('{"r":[' + ($blocos[$k] -join ',') + '],"v":[' + ($viasBloco[$k] -join ',') + ']}') | Set-Content -Encoding ascii (Join-Path $dirBlocos "t$k.json") }
+    $indice = [ordered]@{ atualizado = $hoje; area = $Area; tam = $Tam; total = $pts.Count; cet = $nCet; osm = $nOsm; semaforos = $nSemaf; lombadas = $nLomb; onibus = $nOnibus; com_sentido = $nSentido; com_pista = $nPista; chaves = $chaves }
     $indice | ConvertTo-Json -Compress | Set-Content -Encoding ascii (Join-Path $dirBlocos 'indice.json')
 } else {
     $dirJson = Pasta (Join-Path (Join-Path $Destino 'resources') 'jsondata')
