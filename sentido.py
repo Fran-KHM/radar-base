@@ -15,9 +15,10 @@ Saida:
 So grava sentido quando a via mais proxima e de mao unica, esta a ate DIST_MAX metros e nao ha outra via quase
 tao perto (perto de cruzamento ou entre as duas pistas, fica sem sentido e o app avisa nos dois sentidos).
 
-Uso: python3 sentido.py radares.geojson cet.csv vias.geojsonseq sentidos.json [pistas.json]
+Uso: python3 sentido.py radares.geojson cet.csv vias.geojsonseq sentidos.json [pistas.json [chegadas.json]]
 """
 import csv
+import heapq
 import json
 import math
 import re
@@ -293,6 +294,148 @@ def dist_segmento(lat, lon, a, b):
 
 
 arq_pistas = None   # pistas.json (opcional, 5o argumento): tracado da pista de cada radar
+arq_chegadas = None   # chegadas.json (opcional, 6o argumento): ruas que levam a cada radar
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Ruas de chegada (07/11/2026). O relogio so via a pista do radar (+-400 m de uma via do OSM, as vezes so a quadra
+# do radar): radar logo depois de uma curva ou de uma esquina so aparecia em cima. Agora a base guarda tambem os
+# caminhos de carro que levam ao radar nos ultimos ALCANCE_CHEGADA metros, respeitando a mao das vias, como uma
+# arvore que sai do radar e anda para tras. Cada caminho vai na ordem em que o carro anda (da ponta para o radar):
+# o app avisa quando estamos em cima de um deles e andando no sentido dele.
+# ---------------------------------------------------------------------------------------------------------------
+CEL_REDE = 0.003         # graus (~330 m): vias a ate ~1 celula dos radares entram na rede
+ALCANCE_CHEGADA = 220.0  # metros de caminho para tras a partir do radar
+MAX_PONTOS_CHEGADA = 30  # pontos por radar (o bloco vai para o relogio)
+TOL_CHEGADA = 3.0        # metros: simplificacao dos caminhos
+
+
+def _cels_segmento(u, v):
+    cels = set()
+    passos = int(max(abs(v[1] - u[1]), abs(v[0] - u[0])) / CELULA)
+    for s in range(passos + 2):
+        f = min(1.0, s / (passos + 1))
+        cels.add(celula(u[1] + (v[1] - u[1]) * f, u[0] + (v[0] - u[0]) * f))
+    return cels
+
+
+def calcular_chegadas(radares, sentidos, rede):
+    entra = {}    # no -> nos de onde se chega nele (respeitando a mao)
+    segs = {}     # celula -> segmentos percorriveis (u -> v)
+    for coords, mao in rede:
+        for i in range(len(coords) - 1):
+            a, b = tuple(coords[i][:2]), tuple(coords[i + 1][:2])
+            if a == b:
+                continue
+            pares = [(a, b)] if mao == 1 else [(b, a)] if mao == -1 else [(a, b), (b, a)]
+            for u, v in pares:
+                entra.setdefault(v, set()).add(u)
+                for c in _cels_segmento(u, v):
+                    segs.setdefault(c, []).append((u, v))
+    saida = {}
+    for k, (lat, lon) in radares.items():
+        h = sentidos.get(k)
+        ci, cj = celula(lat, lon)
+        cand, vistos = [], set()
+        for di in (-1, 0, 1):
+            for dj in (-1, 0, 1):
+                for u, v in segs.get((ci + di, cj + dj), ()):
+                    if (u, v) in vistos:
+                        continue
+                    vistos.add((u, v))
+                    d, r = dist_segmento(lat, lon, u, v)
+                    if d <= DIST_MAX + 10:
+                        cand.append((d, r, u, v))
+        if not cand:
+            continue
+        cand.sort(key=lambda c: c[0])
+        if h is not None:
+            inicios = [c for c in cand if difang(c[1], h) <= 60][:1]
+        else:
+            # sem sentido: o radar vale para os dois sentidos da via mais perto
+            inicios = []
+            for c in cand:
+                if c[0] > cand[0][0] + 8:
+                    break
+                if all(difang(c[1], x[1]) > 90 for x in inicios):
+                    inicios.append(c)
+                if len(inicios) == 2:
+                    break
+        cadeias = []
+        for _, _, u, v in inicios:
+            cadeias += arvore_chegada(lat, lon, u, v, entra)
+        saida_k, total = [], 0
+        for cad in cadeias:
+            if total + len(cad) // 2 > MAX_PONTOS_CHEGADA:
+                break
+            saida_k.append(cad)
+            total += len(cad) // 2
+        if saida_k:
+            saida[k] = saida_k
+    return saida
+
+
+def arvore_chegada(lat, lon, u, v, entra):
+    """Caminhos que chegam ao radar entrando pelo segmento u -> v. Cada caminho: [dlat, dlon, ...] x 100000
+    relativos ao radar, na ordem em que o carro anda; o ultimo ponto de um deles e a projecao do radar."""
+    cl = math.cos(math.radians(lat))
+    ax, ay = (u[0] - lon) * M_POR_GRAU * cl, (u[1] - lat) * M_POR_GRAU
+    bx, by = (v[0] - lon) * M_POR_GRAU * cl, (v[1] - lat) * M_POR_GRAU
+    dx, dy = bx - ax, by - ay
+    l2 = dx * dx + dy * dy
+    t = 0.0 if l2 == 0 else max(0.0, min(1.0, -(ax * dx + ay * dy) / l2))
+    proj = (lon + (ax + t * dx) / (M_POR_GRAU * cl), lat + (ay + t * dy) / M_POR_GRAU)
+    d0 = metros(lat, lon, u[1], u[0]) if t > 0 else 0.0
+    dist, pai, cortes = {u: d0}, {u: proj}, []
+    fila = [(d0, u)]
+    while fila:
+        d, n = heapq.heappop(fila)
+        if d > dist.get(n, 1e18):
+            continue
+        for p in entra.get(n, ()):
+            if p == pai[n] or (n == u and p == v):
+                continue   # meia-volta
+            seg = metros(p[1], p[0], n[1], n[0])
+            nd = d + seg
+            if nd > ALCANCE_CHEGADA:
+                f = (ALCANCE_CHEGADA - d) / seg if seg > 0 else 0.0
+                if f > 0.05:
+                    cortes.append(((n[0] + (p[0] - n[0]) * f, n[1] + (p[1] - n[1]) * f), n, ALCANCE_CHEGADA))
+                continue
+            if nd < dist.get(p, 1e18):
+                dist[p] = nd
+                pai[p] = n
+                heapq.heappush(fila, (nd, p))
+    filhos = {}
+    for n in dist:
+        if n != u:
+            filhos[pai[n]] = filhos.get(pai[n], 0) + 1
+    for _, n, _ in cortes:
+        filhos[n] = filhos.get(n, 0) + 1
+    folhas = [(dist[n], n, pai[n]) for n in dist if filhos.get(n, 0) == 0]
+    folhas += [(dd, pt, n) for pt, n, dd in cortes]
+    folhas.sort(key=lambda x: x[0])
+    emitido, cadeias = set(), []
+    for _, f, prox in folhas:
+        pts, n = [f], prox
+        while True:
+            pts.append(n)
+            if n == proj or n in emitido:
+                break
+            emitido.add(n)
+            n = pai[n]
+        if len(pts) < 2:
+            continue
+        xy = [((q[0] - lon) * M_POR_GRAU * cl, (q[1] - lat) * M_POR_GRAU) for q in pts]
+        xy = simplificar(xy, TOL_CHEGADA)
+        cad = []
+        for x, y in xy:
+            par = [round(y / M_POR_GRAU * 100000), round(x / (M_POR_GRAU * cl) * 100000)]
+            if cad[-2:] != par:
+                cad += par
+        if len(cad) >= 4:
+            cadeias.append(cad)
+    return cadeias
 
 
 def main(arq_osm, arq_cet, arq_vias, arq_saida):
@@ -312,6 +455,14 @@ def main(arq_osm, arq_cet, arq_vias, arq_saida):
         las = [radares[k][0] for k in cet_info]
         los = [radares[k][1] for k in cet_info]
         caixa = (min(las) - 0.15, max(las) + 0.15, min(los) - 0.15, max(los) + 0.15)
+    rede_cel = set()      # celulas de CEL_REDE em volta dos radares: vias dali entram na rede (ruas de chegada)
+    if arq_chegadas:
+        for lat, lon in radares.values():
+            ci, cj = math.floor(lat / CEL_REDE), math.floor(lon / CEL_REDE)
+            for di in (-1, 0, 1):
+                for dj in (-1, 0, 1):
+                    rede_cel.add((ci + di, cj + dj))
+    rede = []             # [(coords, mao)] vias perto de algum radar
     trechos = []          # [(palavras, coords)]
     por_palavra = {}      # palavra -> [indice em trechos]
     vias = 0
@@ -334,6 +485,8 @@ def main(arq_osm, arq_cet, arq_vias, arq_saida):
                     trechos.append((nome, coords))
                     for t in nome:
                         por_palavra.setdefault(t, []).append(len(trechos) - 1)
+            if rede_cel and any((math.floor(c[1] / CEL_REDE), math.floor(c[0] / CEL_REDE)) in rede_cel for c in coords):
+                rede.append((coords, mao_unica(p)))
             # radares perto de algum ponto da via (pontos intermediarios a cada ~100 m nos trechos longos)
             perto = set()
             for i in range(len(coords)):
@@ -429,6 +582,13 @@ def main(arq_osm, arq_cet, arq_vias, arq_saida):
 
     with open(arq_saida, "w", encoding="ascii") as f:
         json.dump(sentidos, f, separators=(",", ":"))
+    if arq_chegadas:
+        chegadas = calcular_chegadas(radares, sentidos, rede)
+        with open(arq_chegadas, "w", encoding="ascii") as f:
+            json.dump(chegadas, f, separators=(",", ":"))
+        n = sum(len(c) for v in chegadas.values() for c in v)
+        print(f"Ruas de chegada: {len(chegadas)} radares, {n // 2} pontos (media {n / 2 / max(1, len(chegadas)):.1f}); "
+              f"vias na rede: {len(rede)}.")
     if arq_pistas:
         with open(arq_pistas, "w", encoding="ascii") as f:
             json.dump(pistas, f, separators=(",", ":"))
@@ -523,4 +683,5 @@ pontos_bloco = {}
 
 if __name__ == "__main__":
     arq_pistas = sys.argv[5] if len(sys.argv) > 5 else None
+    arq_chegadas = sys.argv[6] if len(sys.argv) > 6 else None
     main(*sys.argv[1:5])

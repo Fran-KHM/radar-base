@@ -34,11 +34,11 @@ jobs:
           curl -fsSL --retry 3 -o cet.csv https://raw.githubusercontent.com/cetsp-dados/dados-fiscalizacao-eletronica/HEAD/Base_Locais_Fiscalizados.csv
 
       - name: Sentido de cada radar pela pista de mao unica
-        run: python3 sentido.py radares.geojson cet.csv vias.geojsonseq sentidos.json pistas.json
+        run: python3 sentido.py radares.geojson cet.csv vias.geojsonseq sentidos.json pistas.json chegadas.json
 
       - name: Gerar blocos (CET + OpenStreetMap)
         shell: pwsh
-        run: ./gerar_base.ps1 -Saida servidor -Destino . -Area BR -OsmGeoJson radares.geojson -Sentidos sentidos.json -Pistas pistas.json
+        run: ./gerar_base.ps1 -Saida servidor -Destino . -Area BR -OsmGeoJson radares.geojson -Sentidos sentidos.json -Pistas pistas.json -Chegadas chegadas.json
 
       - name: Publicar se mudou
         run: |

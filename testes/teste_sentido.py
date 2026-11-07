@@ -10,6 +10,7 @@ pista sul (mao unica, 180 graus) em lon -46.70020, ~20 m entre elas. Uma rua de 
   radar F (CET desativado)                 -> ignorado
 """
 import json
+import math
 import os
 import sys
 import tempfile
@@ -23,6 +24,8 @@ radares = {"type": "FeatureCollection", "features": [
     {"type": "Feature", "id": "nB", "geometry": {"type": "Point", "coordinates": [-46.70016, -23.5003]}},
     {"type": "Feature", "id": "nC", "geometry": {"type": "Point", "coordinates": [-46.70010, -23.5006]}},
     {"type": "Feature", "id": "nD", "geometry": {"type": "Point", "coordinates": [-46.69002, -23.5000]}},
+    # R: radar 110 m depois de uma esquina (ruas de chegada, 07/11)
+    {"type": "Feature", "id": "nR", "geometry": {"type": "Point", "coordinates": [-46.68004, -23.4910]}},
 ]}
 with open(os.path.join(pasta, "r.geojson"), "w") as f:
     json.dump(radares, f)
@@ -40,6 +43,12 @@ vias = [
     {"type": "Feature", "id": "w1", "geometry": {"type": "LineString", "coordinates": [[-46.70000, -23.502], [-46.70000, -23.498]]}, "properties": {"highway": "primary", "oneway": "yes", "name": "Avenida Teste"}},
     {"type": "Feature", "id": "w2", "geometry": {"type": "LineString", "coordinates": [[-46.70020, -23.498], [-46.70020, -23.502]]}, "properties": {"highway": "primary", "oneway": "yes", "name": "Avenida Teste"}},
     {"type": "Feature", "id": "w3", "geometry": {"type": "LineString", "coordinates": [[-46.69000, -23.502], [-46.69000, -23.498]]}, "properties": {"highway": "residential"}},
+    # esquina em (-23.4900, -46.6800): B desce para o sul (mao unica) com o radar R; A chega do oeste (mao unica para
+    # leste), D chega do norte (mao dupla), C sai para o leste (mao unica, nao leva ao radar)
+    {"type": "Feature", "id": "wB", "geometry": {"type": "LineString", "coordinates": [[-46.6800, -23.4900], [-46.6800, -23.4940]]}, "properties": {"highway": "secondary", "oneway": "yes"}},
+    {"type": "Feature", "id": "wA", "geometry": {"type": "LineString", "coordinates": [[-46.6830, -23.4900], [-46.6800, -23.4900]]}, "properties": {"highway": "secondary", "oneway": "yes"}},
+    {"type": "Feature", "id": "wC", "geometry": {"type": "LineString", "coordinates": [[-46.6800, -23.4900], [-46.6770, -23.4900]]}, "properties": {"highway": "secondary", "oneway": "yes"}},
+    {"type": "Feature", "id": "wD", "geometry": {"type": "LineString", "coordinates": [[-46.6800, -23.4880], [-46.6800, -23.4900]]}, "properties": {"highway": "residential"}},
 ]
 with open(os.path.join(pasta, "v.geojsonseq"), "w") as f:
     for v in vias:
@@ -47,6 +56,7 @@ with open(os.path.join(pasta, "v.geojsonseq"), "w") as f:
 
 saida = os.path.join(pasta, "s.json")
 sentido.arq_pistas = os.path.join(pasta, "p.json")
+sentido.arq_chegadas = os.path.join(pasta, "c.json")
 sentido.main(os.path.join(pasta, "r.geojson"), os.path.join(pasta, "c.csv"), os.path.join(pasta, "v.geojsonseq"), saida)
 with open(saida) as f:
     s = json.load(f)
@@ -102,7 +112,47 @@ if not ph or ph[1] != 17:
 if sentido.chave(-23.5015, -46.70010) in pistas:
     erros.append("radar I (as duas maos, avenida com canteiro) nao devia ter tracado")
 
+# Ruas de chegada do radar R (110 m depois da esquina): cobre A (80 m a oeste da esquina) e D (55 m ao norte), nao cobre C (sai da
+# esquina), e cada caminho anda no sentido do carro (o ultimo ponto e o mais perto do radar)
+with open(sentido.arq_chegadas) as f:
+    chegadas = json.load(f)
+cr = chegadas.get(sentido.chave(-23.4910, -46.68004))
+
+
+def perto_de_chegada(lat, lon, rlat=-23.4910, rlon=-46.68004):
+    cl = math.cos(math.radians(rlat))
+    px, py = (lon - rlon) * 111195 * cl, (lat - rlat) * 111195
+    melhor = 1e9
+    for cad in cr or []:
+        pts = [(cad[i + 1] / 100000 * 111195 * cl, cad[i] / 100000 * 111195) for i in range(0, len(cad), 2)]
+        for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+            dx, dy = bx - ax, by - ay
+            l2 = dx * dx + dy * dy
+            t = 0.0 if l2 == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / l2))
+            melhor = min(melhor, math.hypot(ax + t * dx - px, ay + t * dy - py))
+    return melhor
+
+
+if s.get(sentido.chave(-23.4910, -46.68004)) != 180:
+    erros.append(f"R devia ter sentido 180, veio {s.get(sentido.chave(-23.4910, -46.68004))}")
+if not cr:
+    erros.append("R devia ter ruas de chegada")
+else:
+    if perto_de_chegada(-23.4900, -46.6808) > 8:
+        erros.append(f"chegada de R devia cobrir a rua A: {cr}")
+    if perto_de_chegada(-23.4895, -46.6800) > 8:
+        erros.append(f"chegada de R devia cobrir a rua D: {cr}")
+    if perto_de_chegada(-23.4900, -46.6785) < 30:
+        erros.append(f"chegada de R nao devia cobrir a rua C: {cr}")
+    if perto_de_chegada(-23.4900, -46.6829) < 30:
+        erros.append(f"chegada de R devia parar em ~220 m de caminho: {cr}")
+    for cad in cr:
+        d_ini = math.hypot(cad[0], cad[1])
+        d_fim = math.hypot(cad[-2], cad[-1])
+        if d_fim > d_ini:
+            erros.append(f"caminho de chegada fora da ordem do carro: {cad}")
+
 if erros:
     print("FALHOU:\n  " + "\n  ".join(erros))
     sys.exit(1)
-print("teste_sentido: ok (18 casos)")
+print("teste_sentido: ok (25 casos)")

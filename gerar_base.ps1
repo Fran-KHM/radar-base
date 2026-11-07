@@ -17,7 +17,8 @@ param(
     [string]$Trabalho = '',        # pasta das copias baixadas (padrao: <Destino>/dados)
     [string]$OsmGeoJson = '',      # radares ja filtrados do extrato do Geofabrik (osmium export); vazio = Overpass
     [string]$Sentidos = '',        # sentidos.json do sentido.py: sentido de cada radar pela pista de mao unica
-    [string]$Pistas = ''           # pistas.json do sentido.py: tracado da pista de cada radar (+-400 m)
+    [string]$Pistas = '',          # pistas.json do sentido.py: tracado da pista de cada radar (+-400 m)
+    [string]$Chegadas = ''         # chegadas.json do sentido.py: ruas que levam a cada radar (arquivo c<bloco>.json a parte)
 )
 $ErrorActionPreference = 'Stop'
 $inv = [Globalization.CultureInfo]::InvariantCulture
@@ -148,6 +149,10 @@ if ($Sentidos -and (Test-Path $Sentidos)) {
 $mapaPistas = $null
 $nPista = 0
 if ($Pistas -and (Test-Path $Pistas)) { $mapaPistas = Get-Content $Pistas -Raw | ConvertFrom-Json }
+$mapaCheg = $null
+$nCheg = 0
+if ($Chegadas -and (Test-Path $Chegadas)) { $mapaCheg = Get-Content $Chegadas -Raw | ConvertFrom-Json }
+$chegBloco = @{}
 
 # 5. Blocos: chave = linha * 10000 + coluna; cada radar = lat x 100000, lon x 100000, limite (0 = sem),
 #    direcao fiscalizada em graus (-1 = sem), tipo (bits). Em paralelo, "v": o tracado da pista de cada radar,
@@ -156,7 +161,7 @@ $blocos = @{}
 $viasBloco = @{}
 foreach ($p in $pts) {
     $k = [int][Math]::Floor(($p[0] + 90.0) / $Tam) * 10000 + [int][Math]::Floor(($p[1] + 180.0) / $Tam)
-    if (-not $blocos.ContainsKey($k)) { $blocos[$k] = New-Object System.Collections.ArrayList; $viasBloco[$k] = New-Object System.Collections.ArrayList }
+    if (-not $blocos.ContainsKey($k)) { $blocos[$k] = New-Object System.Collections.ArrayList; $viasBloco[$k] = New-Object System.Collections.ArrayList; $chegBloco[$k] = New-Object System.Collections.ArrayList }
     [void]$blocos[$k].AddRange(@([int][Math]::Round($p[0] * 100000), [int][Math]::Round($p[1] * 100000), $p[2], $p[3], $p[4]))
     $pista = '[]'
     if ($mapaPistas) {
@@ -164,6 +169,13 @@ foreach ($p in $pts) {
         if ($null -ne $v) { $pista = '[' + ($v -join ',') + ']'; $nPista++ }
     }
     [void]$viasBloco[$k].Add($pista)
+    # ruas de chegada: lista de caminhos [[dlat, dlon, ...], ...] na mesma ordem dos radares ([] = sem)
+    $cheg = '[]'
+    if ($mapaCheg) {
+        $c = $mapaCheg."$([Math]::Floor($p[0] * 100000 + 0.5)),$([Math]::Floor($p[1] * 100000 + 0.5))"
+        if ($null -ne $c) { $cheg = '[' + ((@($c) | ForEach-Object { '[' + (@($_) -join ',') + ']' }) -join ',') + ']'; $nCheg++ }
+    }
+    [void]$chegBloco[$k].Add($cheg)
 }
 $chaves = @($blocos.Keys | Sort-Object)
 $tamTxt = $Tam.ToString($inv)
@@ -174,7 +186,10 @@ if ($Saida -eq 'servidor') {
     Get-ChildItem $dirBlocos -Filter 't*.json' | Remove-Item -Confirm:$false
     # objeto {"r":[...]} e nao lista solta: o makeWebRequest do relogio espera um dicionario JSON
     foreach ($k in $chaves) { ('{"r":[' + ($blocos[$k] -join ',') + '],"v":[' + ($viasBloco[$k] -join ',') + ']}') | Set-Content -Encoding ascii (Join-Path $dirBlocos "t$k.json") }
-    $indice = [ordered]@{ atualizado = $hoje; area = $Area; tam = $Tam; total = $pts.Count; cet = $nCet; osm = $nOsm; semaforos = $nSemaf; lombadas = $nLomb; onibus = $nOnibus; com_sentido = $nSentido; com_pista = $nPista; chaves = $chaves }
+    # ruas de chegada num arquivo a parte por bloco: se o relogio nao conseguir baixar (tamanho), o resto funciona
+    Get-ChildItem $dirBlocos -Filter 'c*.json' | Remove-Item -Confirm:$false
+    if ($mapaCheg) { foreach ($k in $chaves) { ('{"c":[' + ($chegBloco[$k] -join ',') + ']}') | Set-Content -Encoding ascii (Join-Path $dirBlocos "c$k.json") } }
+    $indice = [ordered]@{ atualizado = $hoje; area = $Area; tam = $Tam; total = $pts.Count; cet = $nCet; osm = $nOsm; semaforos = $nSemaf; lombadas = $nLomb; onibus = $nOnibus; com_sentido = $nSentido; com_pista = $nPista; com_chegada = $nCheg; chaves = $chaves }
     $indice | ConvertTo-Json -Compress | Set-Content -Encoding ascii (Join-Path $dirBlocos 'indice.json')
 } else {
     $dirJson = Pasta (Join-Path (Join-Path $Destino 'resources') 'jsondata')
