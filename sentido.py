@@ -20,7 +20,9 @@ Uso: python3 sentido.py radares.geojson cet.csv vias.geojsonseq sentidos.json [p
 import csv
 import json
 import math
+import re
 import sys
+import unicodedata
 
 DIST_MAX = 20.0      # metros do radar ate o eixo da pista
 FOLGA = 8.0          # a segunda via mais proxima precisa estar pelo menos FOLGA metros mais longe...
@@ -36,6 +38,207 @@ def chave(lat, lon):
 
 def celula(lat, lon):
     return (math.floor(lat / CELULA), math.floor(lon / CELULA))
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Sentido declarado pela CET (desde 06/11/2026). Como no Waze, o sentido fiscalizado e um dado do radar, nao uma
+# conclusao tirada da posicao do ponto: a descricao da CET traz "(CENTRO/BAIRRO)", "B/C", "(INTERLAGOS/C BRANCO)"...
+# O ponto so serve para achar a rua (pelo nome) e o rumo dela; o sentido vem do texto. Pela regra de numeracao de
+# Sao Paulo, a rua comeca na ponta mais perto do Marco Zero: CENTRO/BAIRRO = afastando-se do comeco da rua.
+# ---------------------------------------------------------------------------------------------------------------
+MARCO_ZERO = (-23.55031, -46.63395)
+DIST_NOME = 40.0       # metros: via com o nome da rua a ate esta distancia do ponto
+PASSO = 30.0           # metros andados em cada sentido para comparar
+DECISAO_MIN = 10.0     # metros de diferenca minima entre os dois sentidos para decidir
+RAIO_RUA = 12000.0     # metros: trechos da mesma rua considerados para achar o comeco dela
+
+IGNORAR = set("""AV AVENIDA R RUA AL ALAMEDA EST ESTR ESTRADA PCA PRACA PC VD VIAD VIADUTO PTE PONTE TV TRAV TRAVESSA
+LG LARGO ROD RODOVIA MARG DR DRA DEP DEPUTADO PROF PROFA PROFESSOR PROFESSORA ENG ENGENHEIRO GAL GEN GENERAL CEL
+CORONEL PRES PRESIDENTE SEN SENADOR DAS DOS VER VEREADOR BRIG BRIGADEIRO MAL MARECHAL CAP CAPITAO DONA STA SANTA STO
+SANTO SAO NOSSA SENHORA SRA COMEND COMENDADOR CONS CONSELHEIRO GOV GOVERNADOR PREF PREFEITO ALM ALMIRANTE TEN
+TENENTE MAJ MAJOR ARQ ARQUITETO JORN JORNALISTA MIN MINISTRO DOUTOR DOUTORA VISC VISCONDE BARAO CONDE MARQUES DUQUE
+JARDIM VILA NUMERO""".split())
+
+_MARG_PINHEIROS = [(-23.533, -46.737), (-23.567, -46.705), (-23.600, -46.695), (-23.640, -46.722), (-23.680, -46.705)]
+_MARG_TIETE = [(-23.520, -46.730), (-23.517, -46.680), (-23.515, -46.630), (-23.520, -46.580), (-23.510, -46.540)]
+LUGARES = {
+    "CENTRO": [MARCO_ZERO],
+    "CASTELOBRANCO": [(-23.5235, -46.7440)], "CBRANCO": [(-23.5235, -46.7440)], "CB": [(-23.5235, -46.7440)],
+    "AYRTONSENNA": [(-23.5160, -46.5575)], "ASENNA": [(-23.5160, -46.5575)], "AS": [(-23.5160, -46.5575)],
+    "INTERLAGOS": [(-23.7010, -46.6980)],
+    "IMIGRANTES": [(-23.6130, -46.6380)], "IMIGRAN": [(-23.6130, -46.6380)], "IMIG": [(-23.6130, -46.6380)],
+    "ANCHIETA": [(-23.6060, -46.6020)],
+    "MARGINAL": _MARG_PINHEIROS + _MARG_TIETE, "MARG": _MARG_PINHEIROS + _MARG_TIETE,
+    "MPINHEIROS": _MARG_PINHEIROS, "MARGINALPINHEIROS": _MARG_PINHEIROS, "MARGPINHEIROS": _MARG_PINHEIROS,
+    "MTIETE": _MARG_TIETE, "MARGINALTIETE": _MARG_TIETE, "MARGTIETE": _MARG_TIETE,
+    "DIADEMA": [(-23.6860, -46.6230)],
+    "SANTANA": [(-23.5020, -46.6250)],
+    "AEROPORTO": [(-23.6270, -46.6560)],
+    "IPIRANGA": [(-23.5880, -46.6080)],
+    "ITAIM": [(-23.5850, -46.6760)],
+    "PINHEIROS": [(-23.5670, -46.6930)],
+    "MAUA": [(-23.6680, -46.4610)],
+    "CONSOLACAO": [(-23.5530, -46.6600)],
+    "PARAISO": [(-23.5760, -46.6410)],
+}
+
+_CB = r"(?:CENTRO|C)\s*/\s*(?:BAIRRO|B)"
+_BC = r"(?:BAIRRO|B)\s*/\s*(?:CENTRO|C)"
+
+
+def normalizar(s):
+    s = unicodedata.normalize("NFKD", (s or "").upper())
+    return "".join(c for c in s if not unicodedata.combining(c))
+
+
+def tokens(s):
+    return frozenset(t for t in re.findall(r"[A-Z0-9]+", normalizar(s)) if len(t) >= 3 and t not in IGNORAR)
+
+
+def ler_descricao(desc):
+    """Da descricao da CET: lista das ruas (conjuntos de palavras; a primeira e a fiscalizada) e o sentido
+    ("cb", "bc", "ambos", ("para", origem, destino) ou None)."""
+    d = normalizar(desc)
+    cb = re.search(r"(?<![A-Z])" + _CB + r"(?![A-Z])", d)
+    bc = re.search(r"(?<![A-Z])" + _BC + r"(?![A-Z])", d)
+    if cb and bc:
+        alvo = "ambos"          # um registro para as duas maos (ex.: "R GUAIPA B/C, NR 489/R GUAIPA C/B, NR 486")
+    elif cb:
+        alvo = "cb"
+    elif bc:
+        alvo = "bc"
+    else:
+        m = re.search(r"\(([^()/]*?)\s*/\s*([^()/]*?)\)", d)
+        alvo = ("para", m.group(1).strip(), m.group(2).strip()) if m else None
+    cab = re.split(r"[(,]| - |\bA MAIS\b|\bOPOSTO\b|\bALTURA\b|\bNUMERO\b|\bNR\b", d, maxsplit=1)[0]
+    cab = re.split(r"(?<![A-Z])(?:" + _CB + "|" + _BC + r")(?![A-Z])", cab, maxsplit=1)[0]
+    ruas = [t for t in (tokens(x) for x in re.split(r"\bX\b", cab)) if t]
+    return ruas, alvo
+
+
+def lugar(nome):
+    return LUGARES.get(re.sub(r"[^A-Z]", "", normalizar(nome)))
+
+
+def metros(lat, lon, lat2, lon2):
+    cl = math.cos(math.radians(lat))
+    return math.hypot((lon2 - lon) * M_POR_GRAU * cl, (lat2 - lat) * M_POR_GRAU)
+
+
+def andar(lat, lon, rumo, m):
+    r = math.radians(rumo)
+    return lat + m * math.cos(r) / M_POR_GRAU, lon + m * math.sin(r) / (M_POR_GRAU * math.cos(math.radians(lat)))
+
+
+def dist_lista(lat, lon, pts):
+    return min(metros(lat, lon, a, b) for a, b in pts)
+
+
+def escolher_sentido(lat, lon, rumo_via, medida, quer_aumentar):
+    """Entre rumo_via e rumo_via + 180, o que faz `medida` (funcao de lat, lon) aumentar (ou diminuir).
+    Devolve (rumo, folga em metros) ou (None, folga) quando a diferenca e pequena demais para decidir."""
+    base = medida(lat, lon)
+    v = []
+    for h in (rumo_via % 360, (rumo_via + 180) % 360):
+        la, lo = andar(lat, lon, h, PASSO)
+        v.append((medida(la, lo) - base, h))
+    v.sort(reverse=quer_aumentar)
+    folga = abs(v[0][0] - v[1][0])
+    return (v[0][1] if folga >= DECISAO_MIN else None), folga
+
+
+def casa_nome(rua, nome_via):
+    """A via tem todas as palavras da rua da CET (ou a CET tem todas as da via)."""
+    return bool(rua) and bool(nome_via) and (rua <= nome_via or nome_via <= rua)
+
+
+def difang(a, b):
+    return abs((a - b + 180) % 360 - 180)
+
+
+def sentido_via(c):
+    """Sentido de circulacao de uma via candidata (dist, rumo, mao, ...) de mao unica."""
+    return (c[2] + (180 if c[3] < 0 else 0)) % 360
+
+
+def comeco_da_rua(lat, lon, rua, trechos, por_palavra):
+    """Ponto da rua (trechos com o mesmo nome a ate RAIO_RUA) mais perto do Marco Zero: onde a numeracao comeca."""
+    rara = min(rua, key=lambda t: len(por_palavra.get(t, ())))
+    inicio, dmz = None, None
+    for i in por_palavra.get(rara, ()):
+        nome_t, cs = trechos[i]
+        if not casa_nome(rua, nome_t):
+            continue
+        for c in cs:
+            lo, la = c[0], c[1]
+            if metros(lat, lon, la, lo) > RAIO_RUA:
+                continue
+            dm = metros(MARCO_ZERO[0], MARCO_ZERO[1], la, lo)
+            if dmz is None or dm < dmz:
+                inicio, dmz = (la, lo), dm
+    return inicio
+
+
+def sentido_declarado(pt, ruas, alvo, perto, trechos, por_palavra):
+    """Sentido (graus) do radar da CET pelo texto da descricao e as coordenadas da pista certa para o tracado.
+    Devolve (sentido ou None, coords da pista ou None, status)."""
+    lat, lon = pt
+    if alvo is None or not ruas:
+        return None, None, "sem texto"
+    # vias a ate DIST_NOME com o nome de alguma das ruas (a primeira e a fiscalizada; as outras, cruzamentos)
+    cands = [(i, d, rumo, mao, coords, rua) for i, rua in enumerate(ruas) for d, rumo, mao, coords, nome in perto
+             if casa_nome(rua, nome)]
+    if not cands:
+        return None, None, "rua nao achada"
+    # (i, d, rumo, mao, coords, rua) -> as funcoes abaixo usam c[1:] no formato (dist, rumo, mao, coords)
+    if alvo == "ambos":
+        primeira = min(c[0] for c in cands)
+        duplas = sorted((c for c in cands if c[0] == primeira and c[3] == 0), key=lambda c: c[1])
+        return None, (duplas[0][4] if duplas else None), "ambos"
+
+    if alvo in ("cb", "bc"):
+        primeira = min(c[0] for c in cands)
+        c0 = min((c for c in cands if c[0] == primeira), key=lambda c: c[1])
+        inicio = comeco_da_rua(lat, lon, c0[5], trechos, por_palavra)
+        h = None
+        if inicio is not None:
+            h, _ = escolher_sentido(lat, lon, c0[2], lambda a, b: metros(inicio[0], inicio[1], a, b), alvo == "cb")
+        if h is None:
+            # comeco da rua indefinido ou de lado: aproxima pelo Marco Zero
+            h, _ = escolher_sentido(lat, lon, c0[2], lambda a, b: metros(MARCO_ZERO[0], MARCO_ZERO[1], a, b), alvo == "cb")
+        escolhida = c0
+    else:
+        origem, destino = lugar(alvo[1]), lugar(alvo[2])
+        if not origem and not destino:
+            return None, None, "lugar desconhecido"
+
+        def medida(a, b):   # menor = mais perto do destino e mais longe da origem
+            v = 0.0
+            if destino:
+                v += dist_lista(a, b, destino)
+            if origem:
+                v -= dist_lista(a, b, origem)
+            return v
+        h, escolhida, melhor_folga = None, None, -1.0
+        for c in cands:   # rua fiscalizada e cruzamentos: fica a que decide com mais folga
+            hc, folga = escolher_sentido(lat, lon, c[2], medida, False)
+            if hc is not None and folga > melhor_folga:
+                h, escolhida, melhor_folga = hc, c, folga
+    if h is None:
+        return None, None, "indeciso"
+
+    da_rua = [c for c in cands if c[5] == escolhida[5]]
+    unicas = [c for c in da_rua if c[3] != 0]
+    status = "ok"
+    # rua de mao unica (todas as vias dela aqui no mesmo sentido): o transito so anda para um lado
+    if unicas and len(unicas) == len(da_rua) and all(difang(sentido_via(c), sentido_via(unicas[0])) < 60 for c in unicas):
+        if difang(sentido_via(unicas[0]), h) > 90:
+            status = "mao unica corrigiu"
+        h = sentido_via(unicas[0])
+    certa = [c for c in unicas if difang(sentido_via(c), h) < 60]
+    dupla = [c for c in da_rua if c[3] == 0]
+    pista = min(certa, key=lambda c: c[1])[4] if certa else (min(dupla, key=lambda c: c[1])[4] if dupla else None)
+    return h, pista, status
 
 
 def carregar_radares(arq_osm, arq_cet):
@@ -57,7 +260,11 @@ def carregar_radares(arq_osm, arq_cet):
             except ValueError:
                 continue
             pts[chave(lat, lon)] = (lat, lon)
+            cet_info[chave(lat, lon)] = (c[4],) + ler_descricao(c[4])
     return pts
+
+
+cet_info = {}   # chave do radar da CET -> (descricao, ruas, alvo)
 
 
 def mao_unica(p):
@@ -98,6 +305,15 @@ def main(arq_osm, arq_cet, arq_vias, arq_saida):
                 grade.setdefault((ci + di, cj + dj), []).append(k)
 
     melhor = {}   # chave do radar -> lista das 2 vias mais proximas [(dist, id_via, rumo, mao)]
+    perto_cet = {}   # chave do radar da CET -> vias a ate DIST_NOME [(dist, rumo, mao, coords, palavras do nome)]
+    # trechos com nome na area da CET, por palavra do nome (para achar o comeco de cada rua)
+    caixa = None
+    if cet_info:
+        las = [radares[k][0] for k in cet_info]
+        los = [radares[k][1] for k in cet_info]
+        caixa = (min(las) - 0.15, max(las) + 0.15, min(los) - 0.15, max(los) + 0.15)
+    trechos = []          # [(palavras, coords)]
+    por_palavra = {}      # palavra -> [indice em trechos]
     vias = 0
     with open(arq_vias, encoding="utf-8") as f:
         for linha in f:
@@ -110,6 +326,14 @@ def main(arq_osm, arq_cet, arq_vias, arq_saida):
                 continue
             vias += 1
             coords = g["coordinates"]
+            p = ft.get("properties") or {}
+            nome = None
+            if caixa and caixa[0] <= coords[0][1] <= caixa[1] and caixa[2] <= coords[0][0] <= caixa[3] and p.get("name"):
+                nome = tokens(p.get("name"))
+                if nome:
+                    trechos.append((nome, coords))
+                    for t in nome:
+                        por_palavra.setdefault(t, []).append(len(trechos) - 1)
             # radares perto de algum ponto da via (pontos intermediarios a cada ~100 m nos trechos longos)
             perto = set()
             for i in range(len(coords)):
@@ -123,7 +347,6 @@ def main(arq_osm, arq_cet, arq_vias, arq_saida):
                         perto.update(grade.get(celula(lat + (lat2 - lat) * f2, lon + (lon2 - lon) * f2), ()))
             if not perto:
                 continue
-            p = ft.get("properties") or {}
             mao = mao_unica(p)
             id_via = ft.get("id") or p.get("@id") or id(ft)
             for k in perto:
@@ -135,6 +358,8 @@ def main(arq_osm, arq_cet, arq_vias, arq_saida):
                         dmin, rumo = d, r
                 if dmin is None or dmin > 60:
                     continue
+                if k in cet_info and dmin <= DIST_NOME:
+                    perto_cet.setdefault(k, []).append((dmin, rumo, mao, coords, nome or tokens(p.get("name"))))
                 lista = melhor.setdefault(k, [])
                 lista.append((dmin, id_via, rumo, mao, coords))
                 lista.sort(key=lambda x: x[0])
@@ -163,6 +388,44 @@ def main(arq_osm, arq_cet, arq_vias, arq_saida):
         pistas[k] = trecho_pista(coords, lat, lon)
         if mao != 0:
             sentidos[k] = round((rumo + (180 if mao < 0 else 0)) % 360)
+
+    # Radares da CET: o sentido declarado na descricao manda; a posicao do ponto so acha a rua
+    est = {}
+    trocados = []
+    for k, (desc, ruas, alvo) in cet_info.items():
+        h, coords_pista, status = sentido_declarado(radares[k], ruas, alvo, perto_cet.get(k, []), trechos, por_palavra)
+        est[status] = est.get(status, 0) + 1
+        if status == "ambos":
+            sentidos.pop(k, None)
+            if coords_pista:
+                pistas[k] = trecho_pista(coords_pista, *radares[k])
+            else:
+                pistas.pop(k, None)
+            continue
+        if h is None:
+            continue
+        antigo = sentidos.get(k)
+        if antigo is not None and difang(antigo, h) > 90:
+            trocados.append((desc, antigo, round(h)))
+        sentidos[k] = round(h) % 360
+        if coords_pista:
+            pistas[k] = trecho_pista(coords_pista, *radares[k])
+        else:
+            pistas.pop(k, None)   # nao achou a pista certa: sem tracado o app nao descarta por pista
+    if cet_info:
+        print(f"CET: {len(cet_info)} radares ativos; sentido pela descricao: " +
+              ", ".join(f"{s} {n}" for s, n in sorted(est.items(), key=lambda x: -x[1])))
+        print(f"  sentido antigo (pista mais perto) contrario ao declarado: {len(trocados)}")
+        for desc, a, n in trocados[:15]:
+            print(f"    {a:>3} -> {n:>3}  {desc[:90]}")
+        sem_lugar = {}
+        for desc, ruas, alvo in cet_info.values():
+            if isinstance(alvo, tuple) and not lugar(alvo[1]) and not lugar(alvo[2]):
+                nome = f"{alvo[1]}/{alvo[2]}"
+                sem_lugar[nome] = sem_lugar.get(nome, 0) + 1
+        if sem_lugar:
+            print("  lugares sem coordenada (entram no LUGARES): " +
+                  "; ".join(f"{n} ({c})" for n, c in sorted(sem_lugar.items(), key=lambda x: -x[1])[:20]))
 
     with open(arq_saida, "w", encoding="ascii") as f:
         json.dump(sentidos, f, separators=(",", ":"))
