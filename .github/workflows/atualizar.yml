@@ -21,13 +21,15 @@ jobs:
         run: python3 testes/teste_sentido.py
 
       - name: Instalar osmium
-        # ate 3 tentativas, com tempo limite de rede (espelho do apt as vezes trava)
+        # apt primeiro (rapido); se o espelho do Ubuntu estiver fora do ar, instala pelo conda-forge
         run: |
-          for i in 1 2 3; do
-            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update -q &&
-            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y -q osmium-tool && break
-            echo "Tentativa $i falhou, tentando de novo em 30 s"; sleep 30
-          done
+          if ! timeout 180 bash -c 'sudo apt-get -o Acquire::http::Timeout=20 update -q && sudo apt-get -o Acquire::http::Timeout=20 install -y -q osmium-tool'; then
+            echo "apt falhou, usando micromamba (conda-forge)"
+            curl -fsSL --retry 3 https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xj -C "$HOME" bin/micromamba
+            "$HOME/bin/micromamba" create -y -q -p "$HOME/osm" -c conda-forge osmium-tool
+            echo "$HOME/osm/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/osm/bin:$PATH"
+          fi
           osmium --version
 
       - name: Baixar o Brasil do Geofabrik e separar radares e vias de carro
