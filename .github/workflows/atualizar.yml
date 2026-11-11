@@ -11,7 +11,8 @@ permissions:
 
 jobs:
   atualizar:
-    runs-on: ubuntu-latest
+    # fixo no 24.04: o ubuntu-latest esta migrando para o 26 (beta)
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
@@ -20,7 +21,14 @@ jobs:
         run: python3 testes/teste_sentido.py
 
       - name: Instalar osmium
-        run: sudo apt-get update -q && sudo apt-get install -y -q osmium-tool
+        # ate 3 tentativas, com tempo limite de rede (espelho do apt as vezes trava)
+        run: |
+          for i in 1 2 3; do
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update -q &&
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y -q osmium-tool && break
+            echo "Tentativa $i falhou, tentando de novo em 30 s"; sleep 30
+          done
+          osmium --version
 
       - name: Baixar o Brasil do Geofabrik e separar radares e vias de carro
         run: |
