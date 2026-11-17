@@ -34,7 +34,19 @@ jobs:
 
       - name: Baixar o Brasil do Geofabrik e separar radares e vias de carro
         run: |
-          curl -fsSL --retry 3 -o brasil.osm.pbf https://download.geofabrik.de/south-america/brazil-latest.osm.pbf
+          # Geofabrik primeiro; se recusar (16 e 17/11/2026 falhou em 1 s), tenta o espelho openstreetmap.fr.
+          # Cada fonte: 5 tentativas com espera crescente; o codigo HTTP aparece no log.
+          baixou=0
+          for url in https://download.geofabrik.de/south-america/brazil-latest.osm.pbf \
+                     https://download.openstreetmap.fr/extracts/south-america/brazil-latest.osm.pbf; do
+            for t in 1 2 3 4 5; do
+              codigo=$(curl -sSL -A "radar-base-actions" --connect-timeout 30 -o brasil.osm.pbf -w '%{http_code}' "$url" || echo "000")
+              echo "$url tentativa $t: HTTP $codigo"
+              if [ "$codigo" = "200" ] && [ "$(stat -c %s brasil.osm.pbf)" -gt 1000000000 ]; then baixou=1; break 2; fi
+              sleep $((t * 30))
+            done
+          done
+          if [ "$baixou" != "1" ]; then echo "Nenhuma fonte respondeu"; exit 1; fi
           osmium tags-filter brasil.osm.pbf n/highway=speed_camera -o radares.osm.pbf
           osmium export radares.osm.pbf -f geojson --add-unique-id=type_id -o radares.geojson
           osmium tags-filter brasil.osm.pbf w/highway=motorway,motorway_link,trunk,trunk_link,primary,primary_link,secondary,secondary_link,tertiary,tertiary_link,unclassified,residential,living_street -o vias.osm.pbf
