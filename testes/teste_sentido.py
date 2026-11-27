@@ -40,12 +40,12 @@ with open(os.path.join(pasta, "c.csv"), "w") as f:
     f.write('6,2024-01-01,,6,"AV TESTE (INTERLAGOS/SANTANA)",-23.5018,-46.70017\n')         # J: Interlagos e ao sul -> 0
     f.write('7,2024-01-01,,7,"AV TESTE (BAIRRO/CENTRO)",-23.4985,-46.70003\n')              # K: colado na norte -> 180
 vias = [
-    {"type": "Feature", "id": "w1", "geometry": {"type": "LineString", "coordinates": [[-46.70000, -23.502], [-46.70000, -23.498]]}, "properties": {"highway": "primary", "oneway": "yes", "name": "Avenida Teste"}},
-    {"type": "Feature", "id": "w2", "geometry": {"type": "LineString", "coordinates": [[-46.70020, -23.498], [-46.70020, -23.502]]}, "properties": {"highway": "primary", "oneway": "yes", "name": "Avenida Teste"}},
+    {"type": "Feature", "id": "w1", "geometry": {"type": "LineString", "coordinates": [[-46.70000, -23.502], [-46.70000, -23.498]]}, "properties": {"highway": "primary", "oneway": "yes", "name": "Avenida Teste", "maxspeed": "60"}},
+    {"type": "Feature", "id": "w2", "geometry": {"type": "LineString", "coordinates": [[-46.70020, -23.498], [-46.70020, -23.502]]}, "properties": {"highway": "primary", "oneway": "yes", "name": "Avenida Teste", "maxspeed": "60"}},
     {"type": "Feature", "id": "w3", "geometry": {"type": "LineString", "coordinates": [[-46.69000, -23.502], [-46.69000, -23.498]]}, "properties": {"highway": "residential"}},
     # esquina em (-23.4900, -46.6800): B desce para o sul (mao unica) com o radar R; A chega do oeste (mao unica para
     # leste), D chega do norte (mao dupla), C sai para o leste (mao unica, nao leva ao radar)
-    {"type": "Feature", "id": "wB", "geometry": {"type": "LineString", "coordinates": [[-46.6800, -23.4900], [-46.6800, -23.4940]]}, "properties": {"highway": "secondary", "oneway": "yes"}},
+    {"type": "Feature", "id": "wB", "geometry": {"type": "LineString", "coordinates": [[-46.6800, -23.4900], [-46.6800, -23.4940]]}, "properties": {"highway": "secondary", "oneway": "yes", "maxspeed": "50 km/h"}},
     {"type": "Feature", "id": "wA", "geometry": {"type": "LineString", "coordinates": [[-46.6830, -23.4900], [-46.6800, -23.4900]]}, "properties": {"highway": "secondary", "oneway": "yes"}},
     {"type": "Feature", "id": "wC", "geometry": {"type": "LineString", "coordinates": [[-46.6800, -23.4900], [-46.6770, -23.4900]]}, "properties": {"highway": "secondary", "oneway": "yes"}},
     {"type": "Feature", "id": "wD", "geometry": {"type": "LineString", "coordinates": [[-46.6800, -23.4880], [-46.6800, -23.4900]]}, "properties": {"highway": "residential"}},
@@ -57,6 +57,7 @@ with open(os.path.join(pasta, "v.geojsonseq"), "w") as f:
 saida = os.path.join(pasta, "s.json")
 sentido.arq_pistas = os.path.join(pasta, "p.json")
 sentido.arq_chegadas = os.path.join(pasta, "c.json")
+sentido.arq_limites = os.path.join(pasta, "l.json")
 sentido.main(os.path.join(pasta, "r.geojson"), os.path.join(pasta, "c.csv"), os.path.join(pasta, "v.geojsonseq"), saida)
 with open(saida) as f:
     s = json.load(f)
@@ -152,7 +153,17 @@ else:
         if d_fim > d_ini:
             erros.append(f"caminho de chegada fora da ordem do carro: {cad}")
 
+# limite da via (26/11/2026): radar sem maxspeed no ponto herda o da via a ate 20 m
+with open(sentido.arq_limites) as f:
+    lim = json.load(f)
+for nome, lat, lon, esperado in (("A", -23.5000, -46.70004, 60), ("B", -23.5003, -46.70016, 60), ("C", -23.5006, -46.70010, 60),
+                                 ("D", -23.5000, -46.69002, None), ("R", -23.4910, -46.68004, 50)):
+    if lim.get(sentido.chave(lat, lon)) != esperado:
+        erros.append(f"limite de {nome} devia ser {esperado}, veio {lim.get(sentido.chave(lat, lon))}")
+if sentido.limite_via({"maxspeed": "BR:urban"}) != 0 or sentido.limite_via({"maxspeed:forward": "80", "maxspeed:backward": "60"}) != 60 or sentido.limite_via({"maxspeed": "50 mph"}) != 80:
+    erros.append("limite_via leu errado as tags")
+
 if erros:
     print("FALHOU:\n  " + "\n  ".join(erros))
     sys.exit(1)
-print("teste_sentido: ok (25 casos)")
+print("teste_sentido: ok (31 casos)")

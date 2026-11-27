@@ -18,7 +18,8 @@ param(
     [string]$OsmGeoJson = '',      # radares ja filtrados do extrato do Geofabrik (osmium export); vazio = Overpass
     [string]$Sentidos = '',        # sentidos.json do sentido.py: sentido de cada radar pela pista de mao unica
     [string]$Pistas = '',          # pistas.json do sentido.py: tracado da pista de cada radar (+-400 m)
-    [string]$Chegadas = ''         # chegadas.json do sentido.py: ruas que levam a cada radar (arquivo c<bloco>.json a parte)
+    [string]$Chegadas = '',        # chegadas.json do sentido.py: ruas que levam a cada radar (arquivo c<bloco>.json a parte)
+    [string]$Limites = ''          # limites.json do sentido.py: limite da via de cada radar (so para radar do OSM sem maxspeed)
 )
 $ErrorActionPreference = 'Stop'
 $inv = [Globalization.CultureInfo]::InvariantCulture
@@ -125,11 +126,21 @@ function PertoDaCet([double]$lat, [double]$lon) {
     return $false
 }
 $nOsm = 0
+# Radar do OSM sem maxspeed no ponto: usa o limite da via em que ele esta (26/11/2026: na viagem a Itatinga
+# 7 de 17 radares da Castelo Branco e da Raposo nao tinham limite no ponto, mas a rodovia tinha)
+$mapaLim = $null
+$nLimVia = 0
+if ($Limites -and (Test-Path $Limites)) { $mapaLim = Get-Content $Limites -Raw | ConvertFrom-Json }
 foreach ($e in $todos) {
     if (PertoDaCet ([double]$e.lat) ([double]$e.lon)) { continue }
     $dir = -1
     if ($e.tags.direction -match '^\s*(\d+(\.\d+)?)\s*$') { $dir = [int][Math]::Round([double]::Parse($Matches[1], $inv)) % 360 }
-    [void]$pts.Add(@([double]$e.lat, [double]$e.lon, (Num $e.tags.maxspeed), $dir, 1))
+    $lim = Num $e.tags.maxspeed
+    if ($lim -eq 0 -and $mapaLim) {
+        $v = $mapaLim."$([Math]::Floor([double]$e.lat * 100000 + 0.5)),$([Math]::Floor([double]$e.lon * 100000 + 0.5))"
+        if ($v) { $lim = [int]$v; $nLimVia++ }
+    }
+    [void]$pts.Add(@([double]$e.lat, [double]$e.lon, $lim, $dir, 1))
     $nOsm++
 }
 
@@ -189,7 +200,7 @@ if ($Saida -eq 'servidor') {
     # ruas de chegada num arquivo a parte por bloco: se o relogio nao conseguir baixar (tamanho), o resto funciona
     Get-ChildItem $dirBlocos -Filter 'c*.json' | Remove-Item -Confirm:$false
     if ($mapaCheg) { foreach ($k in $chaves) { ('{"c":[' + ($chegBloco[$k] -join ',') + ']}') | Set-Content -Encoding ascii (Join-Path $dirBlocos "c$k.json") } }
-    $indice = [ordered]@{ atualizado = $hoje; area = $Area; tam = $Tam; total = $pts.Count; cet = $nCet; osm = $nOsm; semaforos = $nSemaf; lombadas = $nLomb; onibus = $nOnibus; com_sentido = $nSentido; com_pista = $nPista; com_chegada = $nCheg; chaves = $chaves }
+    $indice = [ordered]@{ atualizado = $hoje; area = $Area; tam = $Tam; total = $pts.Count; cet = $nCet; osm = $nOsm; semaforos = $nSemaf; lombadas = $nLomb; onibus = $nOnibus; com_sentido = $nSentido; com_pista = $nPista; com_chegada = $nCheg; limite_pela_via = $nLimVia; chaves = $chaves }
     $indice | ConvertTo-Json -Compress | Set-Content -Encoding ascii (Join-Path $dirBlocos 'indice.json')
 } else {
     $dirJson = Pasta (Join-Path (Join-Path $Destino 'resources') 'jsondata')

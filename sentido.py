@@ -295,6 +295,25 @@ def dist_segmento(lat, lon, a, b):
 
 arq_pistas = None   # pistas.json (opcional, 5o argumento): tracado da pista de cada radar
 arq_chegadas = None   # chegadas.json (opcional, 6o argumento): ruas que levam a cada radar
+arq_limites = None   # limites.json (opcional, 7o argumento): limite da via de cada radar (26/11/2026: radares de
+                     # rodovia sem maxspeed no ponto, mas com maxspeed na via; o gerar_base usa so quando o ponto nao tem)
+DIST_LIMITE = 20.0   # metros do radar ate a via cujo limite vale para ele
+FOLGA_LIMITE = 6.0   # outra via com limite diferente a menos disso a mais: incerto, sem limite
+
+
+def limite_via(p):
+    """Limite em km/h das tags da via (maxspeed; senao o menor de forward/backward), ou 0."""
+    def num(s):
+        m = re.match(r"\s*(\d+)", str(s or ""))
+        if not m:
+            return 0
+        v = int(m.group(1))
+        return round(v * 1.609) if "mph" in str(s) else v
+    v = num(p.get("maxspeed"))
+    if v:
+        return v
+    lados = [x for x in (num(p.get("maxspeed:forward")), num(p.get("maxspeed:backward"))) if x]
+    return min(lados) if lados else 0
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -448,6 +467,7 @@ def main(arq_osm, arq_cet, arq_vias, arq_saida):
                 grade.setdefault((ci + di, cj + dj), []).append(k)
 
     melhor = {}   # chave do radar -> lista das 2 vias mais proximas [(dist, id_via, rumo, mao)]
+    lim_perto = {}   # chave do radar -> [(dist, limite da via)] das vias a ate DIST_LIMITE + FOLGA_LIMITE
     perto_cet = {}   # chave do radar da CET -> vias a ate DIST_NOME [(dist, rumo, mao, coords, palavras do nome)]
     # trechos com nome na area da CET, por palavra do nome (para achar o comeco de cada rua)
     caixa = None
@@ -513,6 +533,8 @@ def main(arq_osm, arq_cet, arq_vias, arq_saida):
                     continue
                 if k in cet_info and dmin <= DIST_NOME:
                     perto_cet.setdefault(k, []).append((dmin, rumo, mao, coords, nome or tokens(p.get("name"))))
+                if dmin <= DIST_LIMITE + FOLGA_LIMITE:
+                    lim_perto.setdefault(k, []).append((dmin, limite_via(p)))
                 lista = melhor.setdefault(k, [])
                 lista.append((dmin, id_via, rumo, mao, coords))
                 lista.sort(key=lambda x: x[0])
@@ -592,6 +614,20 @@ def main(arq_osm, arq_cet, arq_vias, arq_saida):
     if arq_pistas:
         with open(arq_pistas, "w", encoding="ascii") as f:
             json.dump(pistas, f, separators=(",", ":"))
+    if arq_limites:
+        limites = {}
+        for k, lista in lim_perto.items():
+            lista.sort(key=lambda x: x[0])
+            d1, v1 = lista[0]
+            if d1 > DIST_LIMITE or not v1:
+                continue
+            # outra via quase tao perto com outro limite (alca, marginal, rua que cruza): nao arrisca
+            if any(v != v1 for d, v in lista[1:] if d - d1 < FOLGA_LIMITE):
+                continue
+            limites[k] = v1
+        with open(arq_limites, "w", encoding="ascii") as f:
+            json.dump(limites, f, separators=(",", ":"))
+        print(f"Limite pela via: {len(limites)} radares com via de limite conhecido a ate {DIST_LIMITE:.0f} m.")
     print(f"Vias lidas: {vias}. Radares: {len(radares)}, com via perto: {len(melhor)}, com sentido seguro: {len(sentidos)}, "
           f"com tracado da pista: {len(pistas)} (media {sum(len(v) for v in pistas.values()) / 2 / max(1, len(pistas)):.1f} pontos).")
     relatorio_b(pontos_bloco)
@@ -684,4 +720,5 @@ pontos_bloco = {}
 if __name__ == "__main__":
     arq_pistas = sys.argv[5] if len(sys.argv) > 5 else None
     arq_chegadas = sys.argv[6] if len(sys.argv) > 6 else None
+    arq_limites = sys.argv[7] if len(sys.argv) > 7 else None
     main(*sys.argv[1:5])
